@@ -1,0 +1,966 @@
+#include <stdio.h>
+#include <string.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+/* ====================================================== */
+/*                  ANSI COLOR & STYLE                    */
+/* ====================================================== */
+
+#define RESET     "\033[0m"
+#define BOLD      "\033[1m"
+#define DIM       "\033[2m"
+
+#define RED       "\033[91m"
+#define GREEN     "\033[92m"
+#define YELLOW    "\033[93m"
+#define BLUE      "\033[94m"
+#define CYAN      "\033[96m"
+#define WHITE     "\033[97m"
+
+#define BOX_W     56
+#define ENC_KEY   0x5A
+
+struct User
+{
+    int role;
+    char name[30];
+    char email[50];
+    char password[30];
+    int qno;
+    char answer[30];
+};
+
+struct User users[100];
+int userCount = 0;
+
+char roleNames[5][20] = {"", "Admin", "Mechanic", "Receptionist", "Customer"};
+
+char questions[4][60] = {
+    "What is your favourite colour?",
+    "What is your first pet's name?",
+    "What is your mother's maiden name?",
+    "In which city were you born?"
+};
+
+/* ====================================================== */
+/*                  INPUT & UI HELPERS                    */
+/* ====================================================== */
+
+void clearScreen()
+{
+    printf("\033[2J\033[H");
+    fflush(stdout);
+}
+
+void flushLine()
+{
+    int c;
+    while ((c = getchar()) != '\n' && c != EOF)
+    {
+    }
+}
+
+void repeatChar(char ch, int count)
+{
+    int i;
+    for (i = 0; i < count; i++)
+    {
+        putchar(ch);
+    }
+}
+
+void printTopBorder()
+{
+    printf(CYAN "+");
+    repeatChar('-', BOX_W);
+    printf("+" RESET "\n");
+}
+
+void printMidBorder()
+{
+    printf(CYAN "+");
+    repeatChar('-', BOX_W);
+    printf("+" RESET "\n");
+}
+
+void printBottomBorder()
+{
+    printf(CYAN "+");
+    repeatChar('-', BOX_W);
+    printf("+" RESET "\n");
+}
+
+void printEmptyRow()
+{
+    printf(CYAN "|" RESET);
+    repeatChar(' ', BOX_W);
+    printf(CYAN "|" RESET "\n");
+}
+
+void printCentered(const char *color, const char *text)
+{
+    int len = (int)strlen(text);
+    if (len > BOX_W)
+    {
+        len = BOX_W;
+    }
+    int leftPad = (BOX_W - len) / 2;
+    int rightPad = BOX_W - len - leftPad;
+
+    printf(CYAN "|" RESET);
+    repeatChar(' ', leftPad);
+    printf("%s%.*s" RESET, color, len, text);
+    repeatChar(' ', rightPad);
+    printf(CYAN "|" RESET "\n");
+}
+
+void printLeftRow(const char *color, const char *text)
+{
+    int avail = BOX_W - 3; /* 2 spaces left + 1 space right */
+    int len = (int)strlen(text);
+    if (len > avail)
+    {
+        len = avail;
+    }
+    int pad = avail - len;
+
+    printf(CYAN "|" RESET "  %s%.*s" RESET, color, len, text);
+    repeatChar(' ', pad + 1);
+    printf(CYAN "|" RESET "\n");
+}
+
+void printKeyValRow(const char *key, const char *val, const char *valColor)
+{
+    char buf[120];
+    snprintf(buf, sizeof(buf), "%s: %s", key, val);
+    printLeftRow(valColor, buf);
+}
+
+void header(const char *title)
+{
+    clearScreen();
+    printTopBorder();
+    printEmptyRow();
+    printCentered(BOLD YELLOW, "GARAGE MANAGEMENT SYSTEM");
+    printCentered(DIM WHITE, "Repair  *  Service  *  Care");
+    printEmptyRow();
+    printMidBorder();
+    printLeftRow(BOLD GREEN, title);
+    printBottomBorder();
+    printf("\n");
+}
+
+void menuBoxStart(const char *boxTitle)
+{
+    printTopBorder();
+    printLeftRow(BOLD CYAN, boxTitle);
+    printMidBorder();
+}
+
+void menuBoxEnd()
+{
+    printBottomBorder();
+}
+
+void menuLine(int number, const char *text)
+{
+    char line[100];
+    if (number == 0)
+    {
+        snprintf(line, sizeof(line), "[0]  %s", text);
+        printLeftRow(RED, line);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "[%d]  %s", number, text);
+        printLeftRow(WHITE, line);
+    }
+}
+
+void showError(const char *msg)
+{
+    printf(RED BOLD "  [x] Error: " RESET RED "%s\n" RESET, msg);
+}
+
+void showOk(const char *msg)
+{
+    printf(GREEN BOLD "  [OK] " RESET GREEN "%s\n" RESET, msg);
+}
+
+void showInfo(const char *msg)
+{
+    printf(CYAN BOLD "  [i]  " RESET CYAN "%s\n" RESET, msg);
+}
+
+void waitForKey()
+{
+    printf(DIM "\n  Press Enter to continue..." RESET);
+    fflush(stdout);
+    flushLine();
+}
+
+int getChoice()
+{
+    char t[20];
+    printf(BOLD YELLOW "\n  Select an option > " RESET);
+    fflush(stdout);
+    if (scanf("%19s", t) != 1)
+    {
+        flushLine();
+        return -1;
+    }
+    flushLine();
+    if (strlen(t) == 1 && isdigit((unsigned char)t[0]))
+    {
+        return t[0] - '0';
+    }
+    return -1;
+}
+
+/* ====================================================== */
+/*               MASKED PASSWORD INPUT                    */
+/* ====================================================== */
+
+void readPassword(char pass[], int maxLen)
+{
+    struct termios oldt, newt;
+    int i = 0;
+    int ch;
+
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
+    while (1)
+    {
+        ch = getchar();
+        if (ch == EOF || ch == '\n' || ch == '\r')
+        {
+            printf("\n");
+            break;
+        }
+        else if (ch == 127 || ch == 8) /* Backspace / Delete */
+        {
+            if (i > 0)
+            {
+                i--;
+                printf("\b \b");
+                fflush(stdout);
+            }
+        }
+        else if (i < maxLen - 1 && !iscntrl((unsigned char)ch))
+        {
+            pass[i++] = (char)ch;
+            printf(YELLOW "*" RESET);
+            fflush(stdout);
+        }
+    }
+
+    pass[i] = '\0';
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+}
+
+/* ====================================================== */
+/*            PASSWORD ENCRYPT / DECRYPT (CSV)            */
+/* ====================================================== */
+
+void encryptPasswordToHex(const char plain[], char outHex[], int maxHexLen)
+{
+    int i, pos = 0;
+    int len = (int)strlen(plain);
+
+    outHex[0] = '\0';
+    for (i = 0; i < len && pos + 2 < maxHexLen; i++)
+    {
+        unsigned char enc = (unsigned char)plain[i] ^ ENC_KEY;
+        pos += snprintf(&outHex[pos], (size_t)(maxHexLen - pos), "%02X", enc);
+    }
+    outHex[pos] = '\0';
+}
+
+int decryptPasswordFromHex(const char hex[], char outPlain[], int maxPlainLen)
+{
+    int len = (int)strlen(hex);
+    int i, j = 0;
+
+    if (len == 0 || len % 2 != 0)
+    {
+        return 0;
+    }
+
+    for (i = 0; i < len && j < maxPlainLen - 1; i += 2)
+    {
+        unsigned int byteVal = 0;
+        if (!isxdigit((unsigned char)hex[i]) || !isxdigit((unsigned char)hex[i + 1]))
+        {
+            return 0;
+        }
+        if (sscanf(&hex[i], "%2x", &byteVal) != 1)
+        {
+            return 0;
+        }
+        outPlain[j++] = (char)((unsigned char)byteVal ^ ENC_KEY);
+    }
+    outPlain[j] = '\0';
+    return 1;
+}
+
+/* ====================================================== */
+/*                  FILE FUNCTIONS (CSV)                  */
+/* ====================================================== */
+
+void loadUsers()
+{
+    char line[300];
+    char encPass[120];
+    char decPass[30];
+    FILE *fp = fopen("users.csv", "r");
+
+    userCount = 0;
+    if (fp == NULL)
+    {
+        return;
+    }
+
+    while (userCount < 100 && fgets(line, sizeof(line), fp) != NULL)
+    {
+        struct User temp;
+        if (sscanf(line, " %d , %29[^,] , %49[^,] , %119[^,] , %d , %29[^\n\r]",
+                   &temp.role,
+                   temp.name,
+                   temp.email,
+                   encPass,
+                   &temp.qno,
+                   temp.answer) == 6)
+        {
+            if (temp.role < 1 || temp.role > 4)
+            {
+                continue;
+            }
+            if (temp.qno < 0 || temp.qno > 3)
+            {
+                temp.qno = 0;
+            }
+
+            if (decryptPasswordFromHex(encPass, decPass, sizeof(decPass)))
+            {
+                strcpy(temp.password, decPass);
+            }
+            else
+            {
+                strcpy(temp.password, encPass);
+            }
+
+            users[userCount++] = temp;
+        }
+    }
+
+    fclose(fp);
+}
+
+void saveUsers()
+{
+    int i;
+    char encPass[120];
+    FILE *fp = fopen("users.csv", "w");
+    if (fp == NULL)
+    {
+        showError("Could not open users.csv for writing!");
+        return;
+    }
+    for (i = 0; i < userCount; i++)
+    {
+        encryptPasswordToHex(users[i].password, encPass, sizeof(encPass));
+        fprintf(fp, "%d,%s,%s,%s,%d,%s\n",
+                users[i].role, users[i].name, users[i].email,
+                encPass, users[i].qno, users[i].answer);
+    }
+    fclose(fp);
+}
+
+/* ====================================================== */
+/*                CHECKING FUNCTIONS                      */
+/* ====================================================== */
+
+int findUser(const char name[])
+{
+    int i;
+    for (i = 0; i < userCount; i++)
+    {
+        if (strcmp(users[i].name, name) == 0)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int emailExists(const char email[])
+{
+    int i;
+    for (i = 0; i < userCount; i++)
+    {
+        if (strcmp(users[i].email, email) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int endsWith(const char text[], const char ending[])
+{
+    int tl = (int)strlen(text);
+    int el = (int)strlen(ending);
+    if (tl < el)
+    {
+        return 0;
+    }
+    return strcmp(&text[tl - el], ending) == 0;
+}
+
+int checkEmail(const char e[])
+{
+    int i, atCount = 0, atPos = -1;
+    int len = (int)strlen(e);
+
+    for (i = 0; i < len; i++)
+    {
+        if (e[i] == '@')
+        {
+            atCount++;
+            atPos = i;
+        }
+    }
+    if (atCount != 1 || atPos == 0)
+    {
+        return 0;
+    }
+    if (e[atPos + 1] == '.' || e[atPos + 1] == '\0')
+    {
+        return 0;
+    }
+    if (endsWith(e, "@gmail.com") || endsWith(e, "@diu.edu.bd"))
+    {
+        return 1;
+    }
+    return 0;
+}
+
+int checkPassword(const char p[])
+{
+    int i, upper = 0, lower = 0, special = 0;
+    int len = (int)strlen(p);
+
+    for (i = 0; i < len; i++)
+    {
+        unsigned char c = (unsigned char)p[i];
+        if (isupper(c))
+        {
+            upper = 1;
+        }
+        else if (islower(c))
+        {
+            lower = 1;
+        }
+        else if (ispunct(c))
+        {
+            special = 1;
+        }
+    }
+
+    if (len >= 6 && upper && lower && special)
+    {
+        return 1;
+    }
+
+    printf("\n");
+    showError("Weak password! Please include:");
+    if (len < 6)
+        printf(YELLOW "      - At least 6 characters\n" RESET);
+    if (!upper)
+        printf(YELLOW "      - At least one CAPITAL letter (A-Z)\n" RESET);
+    if (!lower)
+        printf(YELLOW "      - At least one small letter (a-z)\n" RESET);
+    if (!special)
+        printf(YELLOW "      - At least one special character (@ # $ ! & * ...)\n" RESET);
+    printf("\n");
+    return 0;
+}
+
+void toLowerStr(char s[])
+{
+    int i;
+    for (i = 0; s[i] != '\0'; i++)
+    {
+        s[i] = (char)tolower((unsigned char)s[i]);
+    }
+}
+
+/* ====================================================== */
+/*             PASSWORD INPUT (used 2 times)              */
+/* ====================================================== */
+
+void askNewPassword(char pass[])
+{
+    char pass2[30];
+
+    menuBoxStart("PASSWORD REQUIREMENTS");
+    menuLine(1, "Minimum 6 characters long");
+    menuLine(2, "At least 1 uppercase & 1 lowercase letter");
+    menuLine(3, "At least 1 special symbol (@, #, $, !, etc.)");
+    menuBoxEnd();
+    printf("\n");
+
+    while (1)
+    {
+        printf(BOLD "  Enter Password   : " RESET);
+        fflush(stdout);
+        readPassword(pass, 30);
+
+        if (checkPassword(pass) == 0)
+        {
+            continue;
+        }
+
+        printf(BOLD "  Confirm Password : " RESET);
+        fflush(stdout);
+        readPassword(pass2, 30);
+
+        if (strcmp(pass, pass2) != 0)
+        {
+            showError("Passwords do not match. Try again.\n");
+            continue;
+        }
+        break;
+    }
+}
+
+/* ====================================================== */
+/*                    REGISTRATION                        */
+/* ====================================================== */
+
+void registerUser(int role)
+{
+    struct User u;
+    int q;
+
+    u.role = role;
+    header("CREATE NEW ACCOUNT");
+    printKeyValRow("Registering As", roleNames[role], BOLD YELLOW);
+    printLeftRow(DIM WHITE, "Tip: Enter '0' as username to go back. No spaces.");
+    printBottomBorder();
+    printf("\n");
+
+    /* ----- name ----- */
+    while (1)
+    {
+        printf(BOLD "  Enter Username : " RESET);
+        if (scanf("%29s", u.name) != 1)
+        {
+            flushLine();
+            continue;
+        }
+        flushLine();
+
+        if (strcmp(u.name, "0") == 0)
+        {
+            return;
+        }
+        if (strlen(u.name) < 3)
+        {
+            showError("Username must have at least 3 characters.");
+        }
+        else if (findUser(u.name) != -1)
+        {
+            showError("This username is already taken. Try another.");
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    /* ----- email ----- */
+    while (1)
+    {
+        printf(BOLD "  Enter Email    : " RESET);
+        if (scanf("%49s", u.email) != 1)
+        {
+            flushLine();
+            continue;
+        }
+        flushLine();
+
+        if (checkEmail(u.email) == 0)
+        {
+            showError("Use a valid @gmail.com or @diu.edu.bd address.");
+        }
+        else if (emailExists(u.email) == 1)
+        {
+            showError("This email is already registered.");
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    printf("\n");
+    askNewPassword(u.password);
+
+    /* ----- security question ----- */
+    printf("\n");
+    menuBoxStart("CHOOSE A SECURITY QUESTION");
+    for (q = 0; q < 4; q++)
+    {
+        menuLine(q + 1, questions[q]);
+    }
+    menuBoxEnd();
+
+    while (1)
+    {
+        q = getChoice();
+        if (q >= 1 && q <= 4)
+        {
+            break;
+        }
+        showError("Please choose a number from 1 to 4.");
+    }
+    u.qno = q - 1;
+
+    printf(BOLD "  Your Answer (one word) : " RESET);
+    if (scanf("%29s", u.answer) != 1)
+    {
+        flushLine();
+        u.answer[0] = '\0';
+    }
+    else
+    {
+        flushLine();
+    }
+    toLowerStr(u.answer);
+
+    if (userCount < 100)
+    {
+        users[userCount++] = u;
+        saveUsers();
+        printf("\n");
+        showOk("Account created successfully! You can now log in.");
+    }
+    else
+    {
+        printf("\n");
+        showError("User storage limit (100) reached.");
+    }
+    waitForKey();
+}
+
+/* ====================================================== */
+/*                      DASHBOARD                         */
+/* ====================================================== */
+
+void showAllUsers()
+{
+    int i;
+    header("ADMIN - REGISTERED USERS");
+
+    if (userCount == 0)
+    {
+        showInfo("No registered users found in the system.");
+        waitForKey();
+        return;
+    }
+
+    printf(BOLD CYAN "  %-4s  %-16s  %-14s  %-28s\n" RESET, "No.", "Username", "Role", "Email");
+    printf(DIM "  --------------------------------------------------------------------\n" RESET);
+    for (i = 0; i < userCount; i++)
+    {
+        printf("  " YELLOW "%-4d" RESET "  " BOLD "%-16s" RESET "  " GREEN "%-14s" RESET "  %s\n",
+               i + 1, users[i].name, roleNames[users[i].role], users[i].email);
+    }
+    printf(DIM "  --------------------------------------------------------------------\n" RESET);
+    printf(DIM "  Total Users: %d\n" RESET, userCount);
+    waitForKey();
+}
+
+void dashboard(int role, const char name[])
+{
+    int choice, max;
+
+    while (1)
+    {
+        header("CONTROL DASHBOARD");
+        printKeyValRow("Logged in as", name, BOLD GREEN);
+        printKeyValRow("Access Role", roleNames[role], BOLD YELLOW);
+        printMidBorder();
+
+        if (role == 1)
+        {
+            printLeftRow(BOLD CYAN, "ADMINISTRATION");
+            printMidBorder();
+            menuLine(1, "Manage Users");
+            menuLine(2, "All Vehicles");
+            menuLine(3, "Staff & Salary");
+            menuLine(4, "Reports");
+            max = 4;
+        }
+        else if (role == 2)
+        {
+            printLeftRow(BOLD CYAN, "WORKSHOP OPERATIONS");
+            printMidBorder();
+            menuLine(1, "My Job List");
+            menuLine(2, "Update Job Status");
+            menuLine(3, "Request Spare Parts");
+            max = 3;
+        }
+        else if (role == 3)
+        {
+            printLeftRow(BOLD CYAN, "FRONT DESK");
+            printMidBorder();
+            menuLine(1, "Register Vehicle");
+            menuLine(2, "Book Appointment");
+            menuLine(3, "Billing & Payment");
+            max = 3;
+        }
+        else
+        {
+            printLeftRow(BOLD CYAN, "CUSTOMER PORTAL");
+            printMidBorder();
+            menuLine(1, "My Vehicles");
+            menuLine(2, "Book a Service");
+            menuLine(3, "Service History");
+            max = 3;
+        }
+
+        printMidBorder();
+        menuLine(0, "Logout");
+        menuBoxEnd();
+
+        choice = getChoice();
+
+        if (choice == 0)
+        {
+            printf("\n");
+            showInfo("Logged out safely.");
+            waitForKey();
+            return;
+        }
+        else if (choice < 1 || choice > max)
+        {
+            printf("\n");
+            showError("Invalid menu option!");
+            waitForKey();
+        }
+        else if (role == 1 && choice == 1)
+        {
+            showAllUsers();
+        }
+        else
+        {
+            printf("\n");
+            showInfo("This module is scheduled for a future update.");
+            waitForKey();
+        }
+    }
+}
+
+/* ====================================================== */
+/*                         LOGIN                          */
+/* ====================================================== */
+
+void loginUser(int role)
+{
+    char name[30], pass[30], ans[30];
+    int idx, wrong = 0, loggedIn = 0, tries;
+
+    header("ACCOUNT LOGIN");
+    printKeyValRow("Role", roleNames[role], BOLD YELLOW);
+    printLeftRow(DIM WHITE, "Enter '0' as username to return to the role menu.");
+    printBottomBorder();
+    printf("\n");
+
+    printf(BOLD "  Username : " RESET);
+    if (scanf("%29s", name) != 1)
+    {
+        flushLine();
+        return;
+    }
+    flushLine();
+
+    if (strcmp(name, "0") == 0)
+    {
+        return;
+    }
+
+    idx = findUser(name);
+    if (idx == -1 || users[idx].role != role)
+    {
+        printf("\n");
+        showError("No account found with that username for this role.");
+        waitForKey();
+        return;
+    }
+
+    while (wrong < 3)
+    {
+        printf(BOLD "  Password : " RESET);
+        fflush(stdout);
+        readPassword(pass, 30);
+
+        if (strcmp(pass, users[idx].password) == 0)
+        {
+            loggedIn = 1;
+            break;
+        }
+        wrong++;
+        showError("Incorrect password!");
+        printf(YELLOW "      Attempts remaining: %d\n\n" RESET, 3 - wrong);
+    }
+
+    if (loggedIn == 0)
+    {
+        int qIndex = users[idx].qno;
+        if (qIndex < 0 || qIndex > 3)
+        {
+            qIndex = 0;
+        }
+
+        printf("\n");
+        showError("Too many failed password attempts.");
+        showInfo("Complete security verification to reset your password.\n");
+        printf(BOLD CYAN "  Security Question: " RESET BOLD "%s\n" RESET, questions[qIndex]);
+
+        for (tries = 1; tries <= 2; tries++)
+        {
+            printf(BOLD "  Your Answer (Attempt %d/2): " RESET, tries);
+            if (scanf("%29s", ans) != 1)
+            {
+                flushLine();
+                continue;
+            }
+            flushLine();
+            toLowerStr(ans);
+
+            if (strcmp(ans, users[idx].answer) == 0)
+            {
+                loggedIn = 1;
+                break;
+            }
+            showError("Incorrect answer.\n");
+        }
+
+        if (loggedIn == 0)
+        {
+            printf("\n");
+            showError("Identity verification failed. Returning to menu.");
+            waitForKey();
+            return;
+        }
+
+        printf("\n");
+        showOk("Identity verified! Please set a new password.\n");
+        askNewPassword(users[idx].password);
+        saveUsers();
+        printf("\n");
+        showOk("Password updated successfully!");
+    }
+
+    printf("\n");
+    showOk("Login successful! Welcome back.");
+    waitForKey();
+    dashboard(role, users[idx].name);
+}
+
+/* ====================================================== */
+/*                        MENUS                           */
+/* ====================================================== */
+
+void roleMenu(int role)
+{
+    int choice;
+    char titleBuf[60];
+    snprintf(titleBuf, sizeof(titleBuf), "%s PORTAL", roleNames[role]);
+
+    while (1)
+    {
+        header(titleBuf);
+        menuBoxStart("AUTHENTICATION");
+        menuLine(1, "Login to existing account");
+        menuLine(2, "Create new account");
+        printMidBorder();
+        menuLine(0, "Back to main menu");
+        menuBoxEnd();
+
+        choice = getChoice();
+
+        if (choice == 0)
+        {
+            return;
+        }
+        else if (choice == 1)
+        {
+            loginUser(role);
+        }
+        else if (choice == 2)
+        {
+            registerUser(role);
+        }
+        else
+        {
+            printf("\n");
+            showError("Invalid choice! Please select 0, 1, or 2.");
+            waitForKey();
+        }
+    }
+}
+
+int main()
+{
+    int choice;
+
+    loadUsers();
+
+    while (1)
+    {
+        header("MAIN MENU - SELECT YOUR ROLE");
+        menuBoxStart("AVAILABLE ROLES");
+        menuLine(1, "Admin");
+        menuLine(2, "Mechanic");
+        menuLine(3, "Receptionist");
+        menuLine(4, "Customer");
+        printMidBorder();
+        menuLine(0, "Exit");
+        menuBoxEnd();
+
+        choice = getChoice();
+
+        if (choice == 0)
+        {
+            clearScreen();
+            printTopBorder();
+            printEmptyRow();
+            printCentered(BOLD GREEN, "Thank you for using Garage Management System!");
+            printCentered(DIM WHITE, "Drive safe - See you next time.");
+            printEmptyRow();
+            printBottomBorder();
+            printf("\n");
+            break;
+        }
+        else if (choice >= 1 && choice <= 4)
+        {
+            roleMenu(choice);
+        }
+        else
+        {
+            printf("\n");
+            showError("Invalid choice! Enter a number from 0 to 4.");
+            waitForKey();
+        }
+    }
+    return 0;
+}
